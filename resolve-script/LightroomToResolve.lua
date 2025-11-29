@@ -546,9 +546,99 @@ local SKIP_EXTS = {
 
 local function normalize_path(path)
     if IS_WINDOWS then
-        return path:gsub("/", "\\")
+        local normalized = path:gsub("^\\\\%?\\", "")
+        normalized = normalized:gsub("/", "\\")
+        return normalized
     end
     return path
+end
+
+local function normalize_key(path)
+    if IS_WINDOWS then
+        return path:lower()
+    end
+    return path
+end
+
+local function set_map(map, path, value)
+    if not path or path == "" then
+        return
+    end
+    map[normalize_key(path)] = value
+end
+
+local function get_map(map, path)
+    if not path or path == "" then
+        return nil
+    end
+    return map[normalize_key(path)]
+end
+
+local function filename_lower(path)
+    local base = path:match("([^" .. PATH_SEP .. "]+)$") or path
+    return base:lower()
+end
+
+local function file_exists(path)
+    if not path or path == "" then
+        return false
+    end
+    local f = io.open(path, "r")
+    if f then
+        f:close()
+        return true
+    end
+    return false
+end
+
+local function apply_grade_from_drx(timeline_item, drx_path)
+    if not timeline_item or not drx_path then
+        return false, "missing parameters"
+    end
+
+    local graph = timeline_item.GetNodeGraph and timeline_item:GetNodeGraph()
+    if not graph or not graph.ApplyGradeFromDRX then
+        return false, "node graph unavailable"
+    end
+
+    local ok, result = pcall(function()
+        return graph:ApplyGradeFromDRX(drx_path, 0)
+    end)
+
+    if not ok then
+        return false, result
+    end
+
+    if not result then
+        return false, "ApplyGradeFromDRX returned false"
+    end
+
+    return true
+end
+
+local function find_timeline_by_name(project, name)
+    if not project or not name or name == "" then
+        return nil
+    end
+
+    -- Try direct lookup first (available in Resolve 18+)
+    if project.GetTimelineByName then
+        local found = project:GetTimelineByName(name)
+        if found then
+            return found
+        end
+    end
+
+    -- Fallback: iterate all timelines and compare names
+    local total = project.GetTimelineCount and project:GetTimelineCount() or 0
+    for idx = 1, total do
+        local timeline = project:GetTimelineByIndex(idx)
+        if timeline and timeline.GetName and timeline:GetName() == name then
+            return timeline
+        end
+    end
+
+    return nil
 end
 
 local function process_job(job_path, resolve)
@@ -565,6 +655,17 @@ local function process_job(job_path, resolve)
         return false
     end
 
+    local drx_grade_path = job.drxGradePath
+    if drx_grade_path and drx_grade_path ~= "" then
+        drx_grade_path = normalize_path(drx_grade_path)
+        if file_exists(drx_grade_path) then
+            log("DRX grade will be applied: " .. drx_grade_path)
+        else
+            -- Windows の Unicode パスなどでは Lua の io.open が失敗する場合があるので、チェックに失敗しても続行する
+            log("WARNING: Could not verify DRX file on disk (continuing anyway): " .. tostring(drx_grade_path))
+        end
+    end
+
     local project = ensure_project(resolve)
     if not project then
         return false
@@ -572,6 +673,8 @@ local function process_job(job_path, resolve)
     local media_pool = project:GetMediaPool()
 
     local source_type = job.sourceType or "TIFF"
+    -- TIFF は Lightroom 側で回転を焼き込んでいるため Resolve での回転処理を抑制するフラグ
+    local allow_orientation_adjust = (source_type ~= "TIFF")
     local job_files = job.files or {}
     local input_files = {}
     local is_vertical_map = {}
@@ -583,10 +686,10 @@ local function process_job(job_path, resolve)
             if path ~= "" then
                 table.insert(input_files, path)
                 if item.isVertical then
-                    is_vertical_map[path] = true
+                    set_map(is_vertical_map, path, true)
                 end
-                if item.orientation then
-                    orientation_map[path] = item.orientation
+                if allow_orientation_adjust and item.orientation then
+                    set_map(orientation_map, path, item.orientation)
                 end
             end
         elseif type(item) == "string" then
@@ -671,11 +774,14 @@ local function process_job(job_path, resolve)
                 if dng_path then
                     dng_path = normalize_path(dng_path)
                     table.insert(import_files, dng_path)
-                    if is_vertical_map[path] then
-                        is_vertical_map[dng_path] = true
+                    if get_map(is_vertical_map, path) then
+                        set_map(is_vertical_map, dng_path, true)
                     end
-                    if orientation_map[path] then
-                        orientation_map[dng_path] = orientation_map[path]
+                    if allow_orientation_adjust then
+                        local orientation_value = get_map(orientation_map, path)
+                        if orientation_value then
+                            set_map(orientation_map, dng_path, orientation_value)
+                        end
                     end
                 else
                     log("Skipping " .. path .. " due to conversion failure")
@@ -700,13 +806,13 @@ local function process_job(job_path, resolve)
     local timelines_created = 0
     for _, clip in ipairs(imported) do
         media_pool:SetCurrentFolder(timeline_bin)
-        local clip_path = clip:GetClipProperty("File Path")
-        local is_vertical = is_vertical_map[clip_path] or false
+        local clip_path = normalize_path(clip:GetClipProperty("File Path"))
+        local is_vertical = get_map(is_vertical_map, clip_path) or false
         if not is_vertical then
-            local basename = clip_path and clip_path:match("([^" .. PATH_SEP .. "]+)$")
+            local basename = clip_path and filename_lower(clip_path)
             if basename then
                 for path, flag in pairs(is_vertical_map) do
-                    if path:match("([^" .. PATH_SEP .. "]+)$") == basename then
+                    if filename_lower(path) == basename then
                         is_vertical = flag
                         break
                     end
@@ -730,6 +836,31 @@ local function process_job(job_path, resolve)
 
         local clip_name = clip:GetName()
         local base_name = clip_name:gsub("%.%w+$", "")
+        -- Remove _2d suffix if present
+        base_name = base_name:gsub("_2d$", "")
+
+        -- 既存タイムラインがあれば削除してから作成（上書き）
+        local existing_timeline = find_timeline_by_name(project, base_name)
+        if existing_timeline then
+            log("Timeline already exists. Deleting: " .. base_name)
+            local deleted = media_pool:DeleteTimelines({ existing_timeline })
+            if deleted then
+                log(" -> Deleted existing timeline: " .. base_name)
+            else
+                log(" -> Failed to delete timeline: " .. base_name)
+                -- Rename existing timeline to avoid name collision, then continue
+                if existing_timeline.SetName then
+                    local fallback_name = string.format("%s (old %s)", base_name, os.date("%H%M%S"))
+                    local renamed = existing_timeline:SetName(fallback_name)
+                    if renamed then
+                        log(" -> Renamed existing timeline to: " .. fallback_name)
+                    else
+                        log(" -> Failed to rename existing timeline, new timeline creation may still fail.")
+                    end
+                end
+            end
+        end
+
         local new_timeline = media_pool:CreateEmptyTimeline(base_name)
 
         if new_timeline then
@@ -747,37 +878,51 @@ local function process_job(job_path, resolve)
             local items = new_timeline:GetItemListInTrack("video", 1)
             if items and #items > 0 then
                 local item = items[1]
-                local orientation = orientation_map[clip_path]
-                if not orientation and clip_path then
-                    local basename = clip_path:match("([^" .. PATH_SEP .. "]+)$")
-                    if basename then
-                        for path, value in pairs(orientation_map) do
-                            if path:match("([^" .. PATH_SEP .. "]+)$") == basename then
-                                orientation = value
-                                break
+                if allow_orientation_adjust then
+                    local orientation = get_map(orientation_map, clip_path)
+                    if not orientation and clip_path then
+                        local basename = filename_lower(clip_path)
+                        if basename then
+                            for path, value in pairs(orientation_map) do
+                                if filename_lower(path) == basename then
+                                    orientation = value
+                                    break
+                                end
                             end
                         end
                     end
+
+                    local rotation_angle = 0.0
+                    if orientation == "BC" then
+                        rotation_angle = -90.0
+                    elseif orientation == "DA" then
+                        rotation_angle = 90.0
+                    elseif orientation == "CD" then
+                        rotation_angle = 180.0
+                    elseif is_vertical and tl_w < tl_h and clip_w > clip_h then
+                        rotation_angle = -90.0
+                    end
+
+                    if rotation_angle ~= 0.0 then
+                        item:SetProperty("RotationAngle", rotation_angle)
+                        log(string.format(" -> Applied rotation: %.1f", rotation_angle))
+                        local scale_factor = math.max(clip_w, clip_h) / math.min(clip_w, clip_h)
+                        item:SetProperty("ZoomX", scale_factor)
+                        item:SetProperty("ZoomY", scale_factor)
+                        log(string.format(" -> Applied Zoom: %.3f", scale_factor))
+                    end
+                else
+                    -- TIFF では Lightroom 側で正しい向きにレンダリング済みのため、Resolve 上での回転補正を明示的にスキップ
+                    log(" -> Skipped rotation adjustments for TIFF source.")
                 end
 
-                local rotation_angle = 0.0
-                if orientation == "BC" then
-                    rotation_angle = -90.0
-                elseif orientation == "DA" then
-                    rotation_angle = 90.0
-                elseif orientation == "CD" then
-                    rotation_angle = 180.0
-                elseif is_vertical and tl_w < tl_h and clip_w > clip_h then
-                    rotation_angle = -90.0
-                end
-
-                if rotation_angle ~= 0.0 then
-                    item:SetProperty("RotationAngle", rotation_angle)
-                    log(string.format(" -> Applied rotation: %.1f", rotation_angle))
-                    local scale_factor = math.max(clip_w, clip_h) / math.min(clip_w, clip_h)
-                    item:SetProperty("ZoomX", scale_factor)
-                    item:SetProperty("ZoomY", scale_factor)
-                    log(string.format(" -> Applied Zoom: %.3f", scale_factor))
+                if drx_grade_path then
+                    local applied, err = apply_grade_from_drx(item, drx_grade_path)
+                    if applied then
+                        log(" -> Applied DRX grade: " .. drx_grade_path)
+                    else
+                        log(" -> Failed to apply DRX grade: " .. tostring(err))
+                    end
                 end
             end
             log(string.format(" -> Set resolution to %dx%d", tl_w, tl_h))

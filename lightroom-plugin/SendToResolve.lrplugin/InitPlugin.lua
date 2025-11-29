@@ -7,6 +7,13 @@ local LrPathUtils = import "LrPathUtils"
 local LrFileUtils = import "LrFileUtils"
 local LrPrefs = import "LrPrefs"
 
+-- プラットフォーム検出: WIN_ENVとMAC_ENVを定義
+-- パスの区切り文字や標準ファイルパスの形式でプラットフォームを検出
+-- Windowsではパスに`\`が含まれ、macOSでは`/`が使用される
+local homePath = LrPathUtils.getStandardFilePath("home") or ""
+local WIN_ENV = (homePath:match("^[A-Za-z]:\\") ~= nil)  -- Windows形式: C:\Users\...
+local MAC_ENV = not WIN_ENV  -- WindowsでなければmacOSと仮定
+
 -- Get plugin preferences
 local prefs = LrPrefs.prefsForPlugin()
 

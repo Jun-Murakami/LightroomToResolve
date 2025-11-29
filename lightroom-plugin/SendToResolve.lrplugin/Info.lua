@@ -13,6 +13,7 @@ return {
     LrPluginName = "Send to Resolve",
     
     LrInitPlugin = "InitPlugin.lua",
+    LrPluginInfoProvider = "PluginManager.lua",
     
     LrExportMenuItems = {
         {
@@ -29,6 +30,6 @@ return {
     
     LrPluginInfoUrl = "https://jun-murakami.com",
     
-    VERSION = { major = 0, minor = 1, revision = 0, build = 1 },
+    VERSION = { major = 0, minor = 1, revision = 0, build = 0 },
 }
 

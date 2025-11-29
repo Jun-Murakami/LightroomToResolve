@@ -77,14 +77,27 @@ LrTasks.startAsyncTask(function()
     
     -- Write queue job
     if #exportedFiles > 0 then
+        local prefs = LrPrefs.prefsForPlugin()
+        local drxGradePath = prefs.drxGradePath
+        if drxGradePath and drxGradePath ~= "" and not LrFileUtils.exists(drxGradePath) then
+            ResolveUtils.log("Configured DRX file not found, skipping: " .. tostring(drxGradePath))
+            drxGradePath = nil
+        end
+
         local jobPath = ResolveUtils.writeJobFile({
             files = exportedFiles,
             binPath = binPath,
             timelineName = "Lightroom RAW " .. os.date("%Y%m%d-%H%M"),
-            sourceType = "RAW", 
+            sourceType = "RAW",
+            drxGradePath = drxGradePath,
         })
         if jobPath then
-            ResolveUtils.notifyJobCreated(jobPath)
+            local triggered = ResolveUtils.triggerScript()
+            if not triggered then
+                ResolveUtils.notifyJobCreated(jobPath)
+            else
+                LrDialogs.message("Sent to Resolve", "Import process completed.\nCheck the Media Pool in DaVinci Resolve.", "info")
+            end
         else
             LrDialogs.message("Queue Error", "Failed to enqueue Resolve job.")
         end

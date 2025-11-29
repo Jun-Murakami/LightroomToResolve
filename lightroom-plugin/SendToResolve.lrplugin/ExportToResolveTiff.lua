@@ -44,7 +44,7 @@ LrTasks.startAsyncTask(function()
         LR_export_useSubfolder = false,
         
         LR_format = "TIFF",
-        LR_export_colorSpace = "AdobeRGB",
+        LR_export_colorSpace = "sRGB",
         LR_export_bitDepth = 16,
         LR_tiff_compressionMethod = "compressionMethod_None",
         
@@ -87,7 +87,6 @@ LrTasks.startAsyncTask(function()
         if success then
             -- Get orientation
             local photo = rendition.photo
-            local orientation = photo:getRawMetadata("orientation")
             local dims = photo:getRawMetadata("dimensions")
             local isVertical = false
             
@@ -100,7 +99,7 @@ LrTasks.startAsyncTask(function()
                 path = pathOrMessage,
                 name = LrPathUtils.leafName(pathOrMessage),
                 isVertical = isVertical,
-                orientation = orientation
+                -- TIFF は Lightroom 側で回転が焼き込まれているため orientation を渡さない
             })
         else
             LrDialogs.message("Export Error", "Failed to export: " .. tostring(pathOrMessage))
@@ -115,6 +114,12 @@ LrTasks.startAsyncTask(function()
     
     -- Write queue job
     if #exportedFiles > 0 then
+        local drxGradePath = prefs.drxGradePath
+        if drxGradePath and drxGradePath ~= "" and not LrFileUtils.exists(drxGradePath) then
+            ResolveUtils.log("Configured DRX file not found, skipping: " .. tostring(drxGradePath))
+            drxGradePath = nil
+        end
+
         -- Extract just paths for 'files' array in job if structure requires it, 
         -- but updated ResolveUtils.writeJobFile can handle objects if we update it.
         -- Current ResolveUtils expects simple path list or object list?
@@ -134,9 +139,15 @@ LrTasks.startAsyncTask(function()
             binPath = binPath,
             timelineName = "Lightroom TIFF " .. os.date("%Y%m%d-%H%M"),
             sourceType = "TIFF",
+            drxGradePath = drxGradePath,
         })
         if jobPath then
-            ResolveUtils.notifyJobCreated(jobPath)
+            local triggered = ResolveUtils.triggerScript()
+            if not triggered then
+                ResolveUtils.notifyJobCreated(jobPath)
+            else
+                LrDialogs.message("Sent to Resolve", "Import process completed.\nCheck the Media Pool in DaVinci Resolve.", "info")
+            end
         else
             LrDialogs.message("Queue Error", "Failed to enqueue Resolve job.")
         end
