@@ -1,10 +1,12 @@
 # LightroomToResolve
 
 Lightroom Classic で選んだ写真を、ワンクリックで DaVinci Resolve に送り込み、解像度に合わせたタイムラインを自動作成するツールです。縦位置 / RAW / TIFF をサポートします。
+このプログラムは a-tak さんのプロジェクトに大いに影響を受けています。https://github.com/a-tak/DRSorter
 
 ---
 
 This tool allows you to send photos selected in Lightroom Classic to DaVinci Resolve and automatically create a timeline with the appropriate resolution. It supports vertical position / RAW / TIFF.
+This program is greatly influenced by a-tak's project. https://github.com/a-tak/DRSorter
 
 ## 必須ソフト (Required Software)
 
